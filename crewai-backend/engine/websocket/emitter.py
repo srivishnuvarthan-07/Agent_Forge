@@ -18,50 +18,35 @@ class EventType(str, Enum):
 
 class EventEmitter:
     """
-    Sends structured JSON events over WebSocket.
-    Falls back to in-memory log when no connection is active.
+    Sends structured JSON events to all connected WebSocket clients via
+    ConnectionManager, and keeps an in-memory log.
     Supports sync listeners via subscribe() for state tracking.
     """
 
     def __init__(self):
-        self._ws = None
         self.log: list[dict] = []
-        self._listeners: list = []  # list of callables: fn(event: dict)
+        self._listeners: list = []
 
     def subscribe(self, fn) -> None:
-        """Register a sync callable that receives every emitted event dict."""
         self._listeners.append(fn)
 
     def unsubscribe(self, fn) -> None:
-        """Remove a previously registered listener."""
         self._listeners = [l for l in self._listeners if l is not fn]
 
-    async def connect(self, websocket_url: str):
-        """Establish a WebSocket client connection."""
-        try:
-            import websockets
-            self._ws = await websockets.connect(websocket_url)
-        except ImportError:
-            raise RuntimeError("websockets package not installed. Run: pip install websockets")
-
-    async def disconnect(self):
-        if self._ws:
-            await self._ws.close()
-            self._ws = None
-
-    async def _send(self, event: dict):
-        self.log.append(event)
-        # Notify sync listeners (state trackers, job store updaters)
+    def _notify_listeners(self, event: dict):
         for fn in self._listeners:
             try:
                 fn(event)
             except Exception:
                 pass
-        if self._ws:
-            try:
-                await self._ws.send(json.dumps(event))
-            except Exception:
-                pass  # connection dropped — event already in log
+
+    async def _broadcast(self, event: dict):
+        """Push event to all connected WebSocket clients."""
+        # Import here to avoid circular import at module load
+        from engine.websocket.manager import manager
+        self.log.append(event)
+        self._notify_listeners(event)
+        await manager.broadcast(event)
 
     def emit(self, event_type: str, payload: dict):
         """Fire-and-forget emit — safe to call from sync or async context."""
@@ -71,13 +56,12 @@ class EventEmitter:
             **payload,
         }
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(self._send(event))
-            else:
-                loop.run_until_complete(self._send(event))
+            loop = asyncio.get_running_loop()
+            asyncio.ensure_future(self._broadcast(event), loop=loop)
         except RuntimeError:
+            # No running loop — we're in a background thread, schedule safely
             self.log.append(event)
+            self._notify_listeners(event)
 
     # ── Convenience helpers ───────────────────────────────────────────────────
 
@@ -109,5 +93,5 @@ class EventEmitter:
         self.emit(EventType.crew_finished, {"crew_id": crew_id, "result": result})
 
 
-# Shared singleton — imported by other modules
+# Shared singleton
 emitter = EventEmitter()

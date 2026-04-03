@@ -2,7 +2,6 @@ import asyncio
 import random
 from uuid import uuid4
 from crewai import Agent
-from engine.templates.registry import get_template
 from engine.websocket.manager import manager
 from engine.websocket.emitter import emitter
 
@@ -32,6 +31,8 @@ class AgentSpawner:
         offset_x = random.randint(150, 300) * random.choice([-1, 1])
         offset_y = random.randint(100, 200)
 
+        # Lazy import to break circular dependency: registry → spawn_agent → spawner → registry
+        from engine.templates.registry import get_template
         template = get_template(template_id)
         allow_delegation = template.authority_level in DELEGATION_LEVELS
 

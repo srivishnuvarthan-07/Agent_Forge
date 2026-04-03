@@ -6,7 +6,7 @@ import Terminal from './components/Terminal'
 import ReportPanel from './components/ReportPanel'
 import { BACKENDS } from './config'
 
-const INITIAL_NODES = [
+const QUICK_NODES = [
   { id: 'prompt',    label: 'User Prompt',  icon: '💬', status: 'idle', output: '', x: 80,  y: 180 },
   { id: 'planner',   label: 'Planner',      icon: '🗂️', status: 'idle', output: '', x: 280, y: 180 },
   { id: 'research',  label: 'Research',     icon: '🔍', status: 'idle', output: '', x: 480, y: 180 },
@@ -14,16 +14,31 @@ const INITIAL_NODES = [
   { id: 'summary',   label: 'Summary',      icon: '📋', status: 'idle', output: '', x: 880, y: 180 },
 ]
 
-const EDGES = [
+const CANVAS_NODES = [
+  { id: 'ceo',        label: 'CEO Agent',       icon: '👔', status: 'idle', output: '', x: 400, y: 80  },
+  { id: 'researcher', label: 'Researcher Agent', icon: '🔍', status: 'idle', output: '', x: 160, y: 280 },
+  { id: 'analyst',    label: 'Analyst Agent',    icon: '📊', status: 'idle', output: '', x: 400, y: 280 },
+  { id: 'writer',     label: 'Writer Agent',     icon: '✍️', status: 'idle', output: '', x: 640, y: 280 },
+]
+
+const QUICK_EDGES = [
   { from: 'prompt',    to: 'planner'   },
   { from: 'planner',   to: 'research'  },
   { from: 'research',  to: 'execution' },
   { from: 'execution', to: 'summary'   },
 ]
 
+const CANVAS_EDGES = [
+  { from: 'ceo', to: 'researcher' },
+  { from: 'ceo', to: 'analyst'    },
+  { from: 'ceo', to: 'writer'     },
+]
+
 export default function App() {
   const [mode, setMode] = useState('quick') // 'quick' | 'canvas'
-  const [nodes, setNodes] = useState(INITIAL_NODES)
+  const INITIAL_NODES = mode === 'quick' ? QUICK_NODES : CANVAS_NODES
+  const EDGES = mode === 'quick' ? QUICK_EDGES : CANVAS_EDGES
+  const [nodes, setNodes] = useState(QUICK_NODES)
   const [logs, setLogs] = useState(['AgentForge ready. Enter a task and click Run Agents.'])
   const [running, setRunning] = useState(false)
   const [activeAgent, setActiveAgent] = useState(null)
@@ -48,21 +63,24 @@ export default function App() {
 
       ws.onmessage = (e) => {
         const msg = JSON.parse(e.data)
+        // normalise agent id — live mode uses agent_id, quick mode uses agentId
+        const agentId = msg.agentId || msg.agent_id
         if (msg.type === 'connected') {
           // handshake — no-op
         } else if (msg.type === 'job_started') {
-          addLog(`▶ Pipeline started for: "${msg.prompt}"`)
+          addLog(`▶ Pipeline started`)
         } else if (msg.type === 'agent_started') {
-          setActiveAgent(msg.agentId)
-          setNodes(prev => prev.map(n => n.id === msg.agentId ? { ...n, status: 'running' } : n))
-          addLog(msg.log || `⚡ ${msg.label} running...`)
+          setActiveAgent(agentId)
+          setNodes(prev => prev.map(n => n.id === agentId ? { ...n, status: 'running' } : n))
+          addLog(msg.log || `⚡ ${msg.label || agentId} running...`)
         } else if (msg.type === 'agent_completed') {
-          fullOutputs.current[msg.agentId] = msg.output
+          const output = msg.output || ''
+          fullOutputs.current[agentId] = output
           setNodes(prev => prev.map(n =>
-            n.id === msg.agentId ? { ...n, status: 'completed', output: msg.output } : n
+            n.id === agentId ? { ...n, status: 'completed', output } : n
           ))
           setActiveAgent(null)
-          addLog(msg.log || `✓ ${msg.label} done`)
+          addLog(msg.log || `✓ ${msg.label || agentId} done`)
         } else if (msg.type === 'crew_finished') {
           addLog(msg.log || '✅ All agents done')
           setRunning(false)
@@ -87,37 +105,54 @@ export default function App() {
   }, [mode, backend.ws, addLog])
 
   const reset = useCallback(() => {
-    setNodes(INITIAL_NODES)
+    const resetNodes = mode === 'quick' ? QUICK_NODES : CANVAS_NODES
+    setNodes(resetNodes)
     setLogs(['Canvas cleared. Ready for new task.'])
     setActiveAgent(null)
     setReport(null)
     fullOutputs.current = {}
-  }, [])
+  }, [mode])
 
   const switchMode = useCallback((newMode) => {
     if (newMode === mode) return
     setMode(newMode)
-    reset()
-    setLogs([`Switched to ${newMode === 'quick' ? '⚡ Quick Mode (Node.js)' : '🧠 Canvas Mode (CrewAI)'}`])
-  }, [mode, reset])
+    const newNodes = newMode === 'quick' ? QUICK_NODES : CANVAS_NODES
+    setNodes(newNodes)
+    setLogs([`Switched to ${newMode === 'quick' ? '⚡ Quick Mode (Node.js · Groq)' : '🧠 Canvas Mode (CrewAI · Groq)'}`])
+    setActiveAgent(null)
+    setReport(null)
+    fullOutputs.current = {}
+  }, [mode])
 
   const runAgents = useCallback(async (task) => {
     if (running || !task.trim()) return
     setRunning(true)
-    setNodes(INITIAL_NODES)
+    setNodes(mode === 'quick' ? QUICK_NODES : CANVAS_NODES)
     setReport(null)
     fullOutputs.current = {}
     taskRef.current = task
     setLogs([`▶ Submitting task: "${task}" [${mode === 'quick' ? 'Quick Mode' : 'Canvas Mode'}]`])
 
-    // Endpoint differs per mode
     const endpoint = mode === 'quick'
       ? `${backend.http}/run-task`
       : `${backend.http}/api/crews/execute`
 
+    // Canvas Mode: send a real CrewAI crew — CEO orchestrates researcher + analyst + writer
+    const canvasNodes = [
+      { id: 'ceo',        label: 'CEO Agent',        authority_level: 'executive', task_description: task },
+      { id: 'researcher', label: 'Researcher Agent',  authority_level: 'standard',  task_description: task },
+      { id: 'analyst',    label: 'Analyst Agent',     authority_level: 'junior',    task_description: task },
+      { id: 'writer',     label: 'Writer Agent',      authority_level: 'standard',  task_description: task },
+    ]
+    const canvasEdges = [
+      { source: 'ceo', target: 'researcher' },
+      { source: 'ceo', target: 'analyst' },
+      { source: 'ceo', target: 'writer' },
+    ]
+
     const body = mode === 'quick'
       ? { prompt: task }
-      : { nodes: INITIAL_NODES, edges: EDGES, mode: 'demo' }
+      : { nodes: canvasNodes, edges: canvasEdges, mode: 'live', crew_id: `job_${Date.now()}` }
 
     try {
       const res = await fetch(endpoint, {
@@ -140,7 +175,7 @@ export default function App() {
       <TopBar onRun={runAgents} running={running} mode={mode} onSwitchMode={switchMode} />
       <div className="flex flex-1 overflow-hidden relative">
         <Sidebar activeAgent={activeAgent} nodes={nodes} onClear={reset} />
-        <Canvas nodes={nodes} edges={EDGES} />
+        <Canvas nodes={nodes} edges={mode === 'quick' ? QUICK_EDGES : CANVAS_EDGES} />
         <ReportPanel report={report} onClose={() => setReport(null)} />
       </div>
       <Terminal logs={logs} />

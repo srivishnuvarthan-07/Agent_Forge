@@ -43,10 +43,15 @@ def _unregister_engine(crew_id: str) -> None:
 
 
 def _get_llm():
-    """Return a Groq LLM if GROQ_API_KEY is set, otherwise let CrewAI use its default."""
+    """Small fast model with tight token budget to stay within Groq free tier."""
     groq_key = os.getenv("GROQ_API_KEY")
     if groq_key:
-        return LLM(model="groq/llama-3.3-70b-versatile", api_key=groq_key)
+        return LLM(
+            model="groq/llama-3.1-8b-instant",
+            api_key=groq_key,
+            max_tokens=300,   # keep each response short
+            temperature=0.3,
+        )
     return None
 
 
@@ -77,8 +82,9 @@ class HierarchyEngine:
         collaborations: list[tuple[dict, dict]] = []
 
         for edge in edges:
-            source_id = edge["source"]
-            target_id = edge["target"]
+            # support both {source/target} and {from/to} edge formats
+            source_id = edge.get("source") or edge.get("from", "")
+            target_id = edge.get("target") or edge.get("to", "")
             if edge.get("type") == "collaborates_with":
                 if source_id in node_map and target_id in node_map:
                     collaborations.append((node_map[source_id], node_map[target_id]))
@@ -100,21 +106,24 @@ class HierarchyEngine:
             "node_map": node_map,
         }
 
-    def instantiate_agent(self, node: dict) -> Agent:
+    def instantiate_agent(self, node: dict, strip_tools: bool = False) -> Agent:
         template = get_template(node["id"])
         allow_delegation = template.authority_level in DELEGATION_LEVELS
         agent_id = node["id"]
         emitter = self.emitter
 
         def step_callback(step):
-            emitter.agent_thinking(agent_id, str(getattr(step, "output", step))[:300])
+            output = str(getattr(step, "output", step))[:300]
+            emitter.agent_thinking(agent_id, output)
 
-        resolved_tools = [_MEMORY_TOOL_MAP[t] for t in template.tools if t in _MEMORY_TOOL_MAP]
-        for tool in resolved_tools:
-            tool_name = getattr(tool, "name", "") or ""
-            tool_desc = getattr(tool, "description", "") or ""
-            if "[stub]" in tool_name or "[stub]" in tool_desc:
-                logging.warning("Agent '%s' is using stub tool: %s", agent_id, tool_name)
+        # Researcher keeps web_search; analyst and writer don't need tools (saves tokens)
+        TOOL_ALLOWLIST = {"researcher"}
+        strip = node["id"] not in TOOL_ALLOWLIST
+        resolved_tools = [] if (strip_tools or strip) else [
+            _MEMORY_TOOL_MAP[t] for t in template.tools if t in _MEMORY_TOOL_MAP
+        ]
+
+        emitter.agent_started(agent_id, template.role)
 
         agent = Agent(
             role=template.role,
@@ -123,58 +132,61 @@ class HierarchyEngine:
             tools=resolved_tools,
             allow_delegation=allow_delegation,
             verbose=True,
+            max_iter=5,           # stop after 5 iterations max
+            max_retry_limit=1,    # don't retry failed LLM calls repeatedly
             step_callback=step_callback,
             llm=_get_llm(),
         )
-        # Store metadata for task_callback lookup in build_crew
         agent._aw_agent_id = agent_id
         agent._aw_role = template.role
         return agent
 
     def build_crew(self, root_node: dict, children_map: dict[str, list[dict]]) -> Crew:
-        manager_agent = self.instantiate_agent(root_node)
-        child_agents: list[Agent] = []
+        user_task = root_node.get("task_description", "Complete the assigned task.")
+        children = children_map.get(root_node["id"], [])
+
+        all_agents: list[Agent] = []
         all_tasks: list[Task] = []
-        child_output_refs: list[str] = []
 
-        # Create child agents (these go in agents list)
-        for child in children_map.get(root_node["id"], []):
-            child_agent = self.instantiate_agent(child)
-            child_agents.append(child_agent)
-            
-            # Create task for each child
-            child_task = Task(
-                description=f"As {child['id']}, complete your specialized task and provide output.",
-                expected_output=f"Detailed output from {child['id']} agent.",
-                agent=child_agent,
+        # Each specialist gets a focused slice of the task — no delegation
+        ROLE_FOCUS = {
+            "researcher": "Research and gather key facts, data points, and background information about",
+            "analyst":    "Analyse the core concepts, patterns, and implications of",
+            "writer":     "Write a clear, well-structured explanation suitable for a general audience about",
+        }
+
+        for child in children:
+            agent = self.instantiate_agent(child)
+            all_agents.append(agent)
+            focus = ROLE_FOCUS.get(child["id"], "Provide your specialist perspective on")
+            task = Task(
+                description=f"{focus}: {user_task}. Be concise and specific. Max 3 paragraphs.",
+                expected_output=f"A concise, focused output from the {child['id']} specialist (max 200 words).",
+                agent=agent,
             )
-            all_tasks.append(child_task)
-            child_output_refs.append(f"[output:{child['id']}]")
+            all_tasks.append(task)
 
-        # Manager task that synthesizes child outputs
-        child_summary = ", ".join(child_output_refs) if child_output_refs else "no sub-tasks"
-        description = (
-            f"As {root_node['id']}, synthesize the following child outputs: {child_summary}. "
-            f"Produce a final consolidated result."
-        )
-        if self.crew_memory:
-            task_keywords = root_node.get("task_description", "").split()[:5]
-            context = self.crew_memory.get_context_for_agent(root_node["id"], task_keywords)
-            if context:
-                description = f"{context}\n\n{description}"
+        # CEO synthesises — no tools, no delegation, just summarise
+        ceo_agent = self.instantiate_agent(root_node, strip_tools=True)
+        all_agents.append(ceo_agent)
 
-        manager_task = Task(
-            description=description,
-            expected_output="A comprehensive summary incorporating all child agent outputs.",
-            agent=manager_agent,
+        context_note = " ".join(f"[{c['id']} output]" for c in children)
+        ceo_task = Task(
+            description=(
+                f"Synthesise the specialist outputs into one final report for: {user_task}. "
+                f"Combine insights from: {context_note}. "
+                f"Write a clear summary of 3-5 sentences. Do not repeat yourself."
+            ),
+            expected_output="A concise final report (3-5 sentences) combining all specialist findings.",
+            agent=ceo_agent,
+            context=all_tasks,  # CEO reads all previous task outputs
         )
-        all_tasks.append(manager_task)
+        all_tasks.append(ceo_task)
 
         return Crew(
-            agents=child_agents,  # Only child agents, not manager
+            agents=all_agents,
             tasks=all_tasks,
-            process=Process.hierarchical,
-            manager_agent=manager_agent,
+            process=Process.sequential,  # no hierarchical delegation — saves tokens
             verbose=True,
         )
 

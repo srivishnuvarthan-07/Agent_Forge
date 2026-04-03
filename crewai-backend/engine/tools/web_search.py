@@ -5,9 +5,12 @@ from __future__ import annotations
 from crewai.tools import tool
 
 try:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS          # new package name (ddgs)
 except ImportError:
-    DDGS = None  # type: ignore[assignment,misc]
+    try:
+        from duckduckgo_search import DDGS  # fallback to old name
+    except ImportError:
+        DDGS = None  # type: ignore[assignment,misc]
 
 MAX_RESULTS = 5
 

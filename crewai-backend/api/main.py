@@ -53,58 +53,117 @@ def _update_job(job_id, **kwargs):
 # ── Execution modes ───────────────────────────────────────────────────────────
 
 def _run_demo_mode(job_id, nodes, edges):
-    """Demo mode: simulate execution with cached responses, no LLM calls."""
+    """Demo mode: simulate execution, broadcasting events in frontend-compatible format."""
     _update_job(job_id, status="running")
     snapshot = len(emitter.log)
+
+    AGENT_META = {
+        "prompt":    {"label": "User Prompt",    "icon": "💬"},
+        "planner":   {"label": "Planner Agent",  "icon": "🗂️"},
+        "research":  {"label": "Research Agent", "icon": "🔍"},
+        "execution": {"label": "Execution Agent","icon": "⚙️"},
+        "summary":   {"label": "Summary Agent",  "icon": "📋"},
+    }
+    DEMO_OUTPUTS = {
+        "prompt":    "Task received and queued for processing.",
+        "planner":   "1. Analyse the problem\n2. Research key areas\n3. Execute strategy\n4. Summarise findings",
+        "research":  "Found 4 relevant data points:\n• Market size: $2.4B\n• Growth rate: 18% YoY\n• Key players identified\n• Opportunity gap confirmed",
+        "execution": "Strategy executed:\n• Drafted action plan\n• Allocated resources\n• Initiated outreach\n• Tracked KPIs",
+        "summary":   "Summary: Task completed successfully. All agents contributed structured outputs. Final report is ready for review.",
+    }
+
     try:
+        # Broadcast job started
+        emitter.emit("job_started", {"jobId": job_id, "prompt": job_id})
+
+        outputs = {}
         agent_ids = [n["id"] for n in nodes]
+
         for aid in agent_ids:
             if _cancel_flags.get(job_id, threading.Event()).is_set():
                 _update_job(job_id, status="cancelled")
                 return
             while _pause_flags.get(job_id, threading.Event()).is_set():
                 time.sleep(0.2)
+
+            meta = AGENT_META.get(aid, {"label": aid, "icon": "🤖"})
             current = (get_job(job_id) or {}).get("agent_statuses", {})
             _update_job(job_id, agent_statuses={**current, aid: "running"})
-            emitter.agent_started(aid, aid)
-            time.sleep(0.3)
-            emitter.agent_completed(aid, f"[demo] {aid} completed task.")
+
+            emitter.emit("agent_started", {
+                "jobId": job_id,
+                "agentId": aid,
+                "label": meta["label"],
+                "log": f"{meta['icon']} {meta['label']} running...",
+            })
+            time.sleep(1.0)
+
+            output = DEMO_OUTPUTS.get(aid, f"[demo] {aid} completed.")
+            outputs[aid] = output
             current = (get_job(job_id) or {}).get("agent_statuses", {})
             _update_job(job_id, agent_statuses={**current, aid: "completed"})
-        result = "[demo] All agents completed. Business plan synthesized."
-        emitter.crew_finished(job_id, result)
+
+            emitter.emit("agent_completed", {
+                "jobId": job_id,
+                "agentId": aid,
+                "label": meta["label"],
+                "output": output,
+                "log": f"✓ {meta['label']} completed",
+            })
+
+        result = outputs.get("summary", "[demo] All agents completed.")
+        emitter.emit("crew_finished", {
+            "jobId": job_id,
+            "result": result,
+            "outputs": outputs,
+            "log": "✅ All agents completed. Report ready.",
+        })
         _update_job(job_id, status="completed", result=result, events=emitter.log[snapshot:])
+
     except Exception as e:
         emitter.agent_error("crew", str(e))
         _update_job(job_id, status="failed", error=str(e))
 
 
 def _run_live_mode(job_id, nodes, edges, timeout=CREW_TIMEOUT):
-    """Live mode: real CrewAI + LLM calls with per-agent error isolation."""
+    """Live mode: real CrewAI + Groq LLM calls, broadcasts frontend-compatible WS events."""
     _update_job(job_id, status="running")
     snapshot = len(emitter.log)
 
-    # ── Live state listener ───────────────────────────────────────────────────
+    # Build a label map from node id → display name for WS events
+    label_map = {n["id"]: n.get("label", n["id"]) for n in nodes}
+
     def _on_event(event: dict):
-        """Update job agent_statuses from engine events in real time."""
+        """Translate engine events → frontend-compatible format and update job store."""
         etype = event.get("type", "")
         agent_id = event.get("agent_id", "")
         if not agent_id:
             return
+        label = label_map.get(agent_id, agent_id)
         current = (get_job(job_id) or {}).get("agent_statuses", {})
         if etype == "agent_started":
             update_job(job_id, agent_statuses={**current, agent_id: "running"})
+            emitter.emit("agent_started", {
+                "jobId": job_id,
+                "agentId": agent_id,
+                "label": label,
+                "log": f"⚡ {label} is working...",
+            })
         elif etype == "agent_completed":
             update_job(job_id, agent_statuses={**current, agent_id: "completed"})
+            emitter.emit("agent_completed", {
+                "jobId": job_id,
+                "agentId": agent_id,
+                "label": label,
+                "output": event.get("output", ""),
+                "log": f"✓ {label} completed",
+            })
         elif etype == "agent_error":
             update_job(job_id, agent_statuses={**current, agent_id: "error"})
 
     emitter.subscribe(_on_event)
     try:
         engine = HierarchyEngine(event_emitter=emitter)
-
-        # agent lifecycle events handled via step_callback in HierarchyEngine.instantiate_agent
-
         result_holder = [None]
         error_holder  = [None]
 
@@ -114,21 +173,35 @@ def _run_live_mode(job_id, nodes, edges, timeout=CREW_TIMEOUT):
             except Exception as e:
                 error_holder[0] = str(e)
 
+        emitter.emit("job_started", {"jobId": job_id})
         t = threading.Thread(target=_target, daemon=True)
         t.start()
         t.join(timeout=timeout)
 
         if t.is_alive():
-            _update_job(job_id, status="failed", error=f"Crew timed out after {timeout}s")
+            err = f"Crew timed out after {timeout}s"
+            _update_job(job_id, status="failed", error=err)
+            emitter.emit("error", {"jobId": job_id, "message": err})
             return
 
         if error_holder[0]:
             _update_job(job_id, status="failed", error=error_holder[0], events=emitter.log[snapshot:])
+            emitter.emit("error", {"jobId": job_id, "message": error_holder[0]})
         else:
-            _update_job(job_id, status="completed", result=str(result_holder[0]), events=emitter.log[snapshot:])
+            result_str = str(result_holder[0])
+            job = get_job(job_id)
+            outputs = job.get("agent_statuses", {}) if job else {}
+            _update_job(job_id, status="completed", result=result_str, events=emitter.log[snapshot:])
+            emitter.emit("crew_finished", {
+                "jobId": job_id,
+                "result": result_str,
+                "outputs": {aid: result_str for aid in label_map},
+                "log": "✅ All agents completed. Report ready.",
+            })
 
     except Exception as e:
         _update_job(job_id, status="failed", error=str(e))
+        emitter.emit("error", {"jobId": job_id, "message": str(e)})
     finally:
         emitter.unsubscribe(_on_event)
 
