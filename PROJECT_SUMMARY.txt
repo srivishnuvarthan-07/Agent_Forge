@@ -1,0 +1,198 @@
+================================================================================
+AGENTFORGE — PROJECT SUMMARY
+Last updated: Phase 3 complete
+================================================================================
+
+WHAT IS AGENTFORGE?
+-------------------
+AgentForge is a Low-Code Multi-Agent Builder that lets users visually design and
+run hierarchical AI agent workflows on a drag-and-drop canvas. It uses CrewAI for
+agent orchestration, Groq LLM (llama-3.3-70b-versatile) as the language model,
+ChromaDB for shared agent memory, and FastAPI + WebSockets for the backend API.
+
+Users place agent nodes (CEO, Researcher, Analyst, Developer, etc.) on a canvas,
+connect them with edges to define hierarchy and collaboration, then submit the
+canvas to the backend which runs the crew and streams real-time events back over
+WebSocket.
+
+CANONICAL SERVER COMMAND
+------------------------
+    uvicorn api.main:app --reload
+
+TEST COMMAND
+------------
+    python -m pytest tests/ -v
+
+
+================================================================================
+PHASE 1 — BACKEND & ENGINE WIRING (COMPLETED)
+================================================================================
+
+1. Single authoritative requirements.txt at repo root with all deps
+2. Fixed all broken backend/ import paths (bare names → backend.* prefix)
+3. Deprecated backend/main.py and root main.py — canonical entry is api/main.py
+4. Registered 7 stub tools in _MEMORY_TOOL_MAP with logging.warning on use
+5. Fixed AgentSpawner broadcast — removed broken queue.append() fallback lines
+6. Wired ConflictDetector into SharedMemory.write (lazy import, both paths)
+7. Fixed api/main.py: removed duplicate import, proper 404s, conflict endpoints
+8. Tests: 5 passing (3 spawner broadcast + 2 import smoke tests)
+
+
+================================================================================
+PHASE 2 — REAL TOOL IMPLEMENTATIONS (COMPLETED)
+================================================================================
+
+All 7 stub tools replaced with real implementations in engine/tools/ package.
+Registry updated — no stubs remain at runtime.
+
+  calculator.py     AST-safe evaluator, never calls eval(), null-byte guarded
+  web_search.py     DuckDuckGo via duckduckgo-search, no API key, max 5 results
+  code_executor.py  Subprocess sandbox, AST import scan, 10s timeout
+  file_write.py     Restricted to workspace/output/, double path-traversal check
+  spawn_agent.py    Queues spawn on active HierarchyEngine, WS broadcast fallback
+  delegate_task.py  Writes delegation record to SharedMemory, resilient on failure
+  flag_conflict.py  Writes JSON conflict record with unique timestamped key
+
+Tests: 35 unit tests in tests/test_tools.py — all passing
+
+
+================================================================================
+PHASE 3 — ENGINE WIRING & INFRASTRUCTURE (COMPLETED)
+================================================================================
+
+1. REGISTRY WIRED (was item 1 in previous "still to do")
+   - engine/templates/registry.py imports real tools from engine/tools/
+   - All 7 inline stub @tool definitions removed
+   - _MEMORY_TOOL_MAP points to real implementations — agents get real tools
+
+2. PROPERTY-BASED TESTS (was item 2 in previous "still to do")
+   - tests/test_tools_properties.py created with Hypothesis
+   - 5 properties, 100 examples each, all passing:
+     * calculator idempotence
+     * calculator model-based correctness (matches Python eval)
+     * file_write round-trip (write then read = same bytes)
+     * file_write path safety (traversal always blocked)
+     * all tools return str for arbitrary inputs
+   - Hypothesis found and fixed a real bug: calculator crashed on null bytes
+
+3. ENGINECONNECTOR WIRED TO ENGINE EVENTS (was item 3 in previous "still to do")
+   - EventEmitter gained subscribe(fn) / unsubscribe(fn) listener registry
+   - _run_live_mode in api/main.py registers a _on_event listener per job
+   - agent_started → agent_statuses[id] = "running" in job record
+   - agent_completed → agent_statuses[id] = "completed" in job record
+   - agent_error → agent_statuses[id] = "error" in job record
+   - Listener always cleaned up in finally block — no cross-job leaks
+
+4. DYNAMIC AGENT SPAWNING END-TO-END (was item 4 in previous "still to do")
+   - HierarchyEngine has a thread-safe SpawnRequest queue + enqueue_spawn()
+   - MAX_SPAWN_DEPTH = 3 prevents infinite recursion
+   - _drain_spawn_queue() runs after crew.kickoff() — executes each queued spawn
+     as a mini sequential Crew, collects results, appends to final output
+   - Module-level _active_engines registry maps crew_id → HierarchyEngine
+   - spawn_agent tool pushes onto active engine queue when crew is running;
+     falls back to WS broadcast-only when called outside execution context
+   - set_current_crew_id() called at start/end of every execute()
+
+5. PERSISTENT JOB STORE (was item 8 in previous "still to do")
+   - api/job_store.py: SQLite-backed store (jobs.db at repo root)
+   - create_job, get_job, update_job, list_jobs — thread-safe with _lock
+   - All _jobs dict references in api/main.py replaced with persistent calls
+   - Added GET /api/crews endpoint to list recent jobs (last 200)
+   - Job history survives server restarts
+
+6. CLEAN FOLDER STRUCTURE
+   - tests/test_spawner.py moved from engine/execution/ — tests no longer
+     live inside source packages
+   - .gitignore updated: excludes backend/venv/, chroma_db/, jobs.db,
+     .hypothesis/, .pytest_cache/, .vscode/
+
+TOTAL TESTS: 45 passing (tests/ directory)
+
+
+================================================================================
+WHAT STILL NEEDS TO BE DONE
+================================================================================
+
+1. REDIS / PUB-SUB NOT IN CANONICAL APP
+   - backend/pubsub/manager.py only used in backend/main.py (non-active)
+   - api/main.py has no Redis integration
+   - Needed for multi-instance / horizontal scaling
+
+2. CONFLICT RESOLUTION UI
+   - Conflict detection is automatic, endpoints exist
+   - GET /api/conflicts and POST /api/conflicts/{key}/resolve are live
+   - No frontend UI to review and resolve conflicts
+
+3. AUTHENTICATION & AUTHORIZATION
+   - No auth on any endpoint — all routes are open
+   - For production: add API key or JWT auth middleware
+
+4. FRONTEND CANVAS NOT COVERED
+   - Backend and engine layers fully addressed
+   - Drag-and-drop canvas frontend (React/Vue) not reviewed or fixed
+
+5. PRODUCTION HARDENING
+   - Add rate limiting
+   - Add structured logging (replace print statements)
+   - Add health checks for ChromaDB and Groq connectivity
+   - Add Docker / docker-compose setup
+   - Add environment variable validation on startup
+   - Add CORS origin restriction (currently allow_origins=["*"])
+
+6. ADDITIONAL TEST COVERAGE
+   - EngineConnector callback unit tests
+   - WebSocket disconnect removes connection from active list
+   - ConflictDetector integration (write same key twice, event emitted)
+   - SharedMemory edge cases (promote_to_fact, PermissionError, KeyError)
+   - Endpoint tests (execute 202, health template count, conflicts)
+   - flag_conflict and delegate_task Hypothesis round-trip properties
+
+
+================================================================================
+FILE STRUCTURE
+================================================================================
+
+AgentWeaver/
+├── api/
+│   ├── main.py              <- CANONICAL ENTRY POINT
+│   └── job_store.py         <- SQLite job persistence
+├── engine/
+│   ├── execution/
+│   │   ├── hierarchy.py     <- HierarchyEngine + spawn queue + drain loop
+│   │   └── spawner.py       <- AgentSpawner (WS broadcast)
+│   ├── memory/
+│   │   ├── store.py         <- SharedMemory (ChromaDB + fallback)
+│   │   ├── conflict_detector.py  <- auto-wired into store.write
+│   │   ├── crew_memory.py   <- per-crew context manager
+│   │   └── tools.py         <- write_memory, read_memory, query_memory
+│   ├── templates/
+│   │   ├── registry.py      <- _MEMORY_TOOL_MAP (real tools, no stubs)
+│   │   └── ceo/researcher/analyst/... (10 agent templates)
+│   ├── tools/               <- 7 real tool implementations
+│   │   ├── calculator.py
+│   │   ├── web_search.py
+│   │   ├── code_executor.py
+│   │   ├── file_write.py
+│   │   ├── spawn_agent.py
+│   │   ├── delegate_task.py
+│   │   └── flag_conflict.py
+│   └── websocket/
+│       ├── emitter.py       <- EventEmitter + subscribe/unsubscribe
+│       └── manager.py       <- ConnectionManager (WS broadcast)
+├── backend/                 <- reference only, NOT active server
+│   ├── main.py              <- deprecated
+│   ├── api/routes.py
+│   ├── integration/engine_connector.py
+│   ├── state/store.py
+│   └── websocket/
+├── tests/                   <- ALL tests here
+│   ├── test_imports.py      <- 2 smoke tests
+│   ├── test_spawner.py      <- 3 AgentSpawner broadcast tests
+│   ├── test_tools.py        <- 35 tool unit tests
+│   └── test_tools_properties.py  <- 5 Hypothesis property tests
+├── config.py                <- loads .env, sets dummy OPENAI_API_KEY
+├── requirements.txt         <- all runtime deps
+├── jobs.db                  <- SQLite job store (runtime, gitignored)
+└── .gitignore               <- excludes venv, chroma_db, jobs.db, caches
+
+================================================================================

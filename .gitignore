@@ -1,0 +1,82 @@
+# ─── Environment & Secrets ───────────────────────────────────────────────────
+.env
+.env.*
+*.env
+!.env.example
+
+# ─── Node / Frontend ─────────────────────────────────────────────────────────
+node_modules/
+dist/
+build/
+.cache/
+.parcel-cache/
+.next/
+.nuxt/
+.output/
+*.tsbuildinfo
+
+# ─── Logs ────────────────────────────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# ─── Virtual Environments ────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+backend/venv/
+
+# ─── Testing & Coverage ──────────────────────────────────────────────────────
+.hypothesis/
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+
+# ─── Databases & Generated Data ──────────────────────────────────────────────
+chroma_db/
+jobs.db
+*.db
+*.sqlite
+*.sqlite3
+
+# ─── Workspace / Output ──────────────────────────────────────────────────────
+workspace/output/
+workspace/
+
+# ─── IDE & Editor ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── OS Files ────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ─── Kiro IDE ────────────────────────────────────────────────────────────────
+.kiro/
