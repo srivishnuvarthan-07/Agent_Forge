@@ -114,13 +114,13 @@ def test_api_main_imports_without_error():
         raise AssertionError(f"api.main raised an import error: {exc}") from exc
 
 
-def test_backend_main_imports_without_error():
-    """import backend.main must not raise ModuleNotFoundError or ImportError."""
+def test_crewai_backend_main_imports_without_error():
+    """import api.main (crewai-backend) must not raise ModuleNotFoundError or ImportError."""
     for key in list(sys.modules.keys()):
-        if key.startswith("backend.main") or key == "backend.main":
+        if key == "api.main" or key == "api":
             del sys.modules[key]
 
     try:
-        import backend.main  # noqa: F401
+        import api.main  # noqa: F401
     except (ModuleNotFoundError, ImportError) as exc:
-        raise AssertionError(f"backend.main raised an import error: {exc}") from exc
+        raise AssertionError(f"api.main raised an import error: {exc}") from exc

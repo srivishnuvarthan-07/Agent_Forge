@@ -52,14 +52,16 @@ coverage.xml
 
 # ─── Databases & Generated Data ──────────────────────────────────────────────
 chroma_db/
+crewai-backend/chroma_db/
 jobs.db
+crewai-backend/jobs.db
 *.db
 *.sqlite
 *.sqlite3
 
 # ─── Workspace / Output ──────────────────────────────────────────────────────
-workspace/output/
 workspace/
+crewai-backend/workspace/
 
 # ─── IDE & Editor ────────────────────────────────────────────────────────────
 .vscode/

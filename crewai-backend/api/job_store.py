@@ -10,7 +10,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-DB_PATH = Path("jobs.db")
+DB_PATH = Path(__file__).parent.parent / "jobs.db"
 _lock = threading.Lock()
 
 
